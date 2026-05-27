@@ -8,9 +8,10 @@
 // No-ops off Vercel: local builds run the Cloudflare plugin and emit a
 // different layout (dist/server/index.js + wrangler.json), so there is nothing
 // to assemble.
-import { cp, mkdir, writeFile, rm } from "node:fs/promises";
+import { cp, mkdir, writeFile, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { nodeFileTrace } from "@vercel/nft";
 
 if (!process.env.VERCEL) {
   console.log("[vercel-build] not on Vercel, skipping Build Output API assembly");
@@ -18,8 +19,10 @@ if (!process.env.VERCEL) {
 }
 
 // Node serverless function: adapt Node req/res <-> Web Request/Response and
-// delegate to the TanStack Start SSR fetch handler.
-const FUNCTION_ENTRY = `import server from "./server/server.js";
+// delegate to the TanStack Start SSR fetch handler. The SSR bundle is copied to
+// dist/server/ inside the function (preserving its build layout) and its npm
+// dependencies live in node_modules/ alongside it, so bare imports resolve.
+const FUNCTION_ENTRY = `import server from "./dist/server/server.js";
 
 export default async function handler(req, res) {
   try {
@@ -109,11 +112,35 @@ await mkdir(fnDir, { recursive: true });
 // before falling through to the SSR function.
 await cp(distClient, staticDir, { recursive: true });
 
-// The SSR bundle (server.js + its ./assets/*.js chunks) goes inside the
-// function so its relative dynamic imports resolve.
-await cp(distServer, path.join(fnDir, "server"), { recursive: true });
+// The SSR build externalizes all npm dependencies (standard Vite SSR), so the
+// function needs both the dist/server bundle AND the exact set of node_modules
+// files it imports. Trace from every server chunk (server.js dynamically
+// imports its assets/*.js) and copy the resulting file list, preserving each
+// path relative to the project root so node_modules resolution works.
+const serverEntries = (await readdir(path.join(distServer, "assets")))
+  .filter((f) => f.endsWith(".js"))
+  .map((f) => path.join("dist", "server", "assets", f));
+serverEntries.push(path.join("dist", "server", "server.js"));
+
+const { fileList } = await nodeFileTrace(serverEntries, { base: root });
+
+for (const file of fileList) {
+  await cp(path.join(root, file), path.join(fnDir, file), { recursive: true });
+}
+console.log(`[vercel-build] traced ${fileList.size} files into the function`);
 
 await writeFile(path.join(fnDir, "index.mjs"), FUNCTION_ENTRY);
+
+// The dist/server/*.js files use ESM syntax but have a .js extension and no
+// package.json of their own. Vercel deploys the function in isolation with no
+// parent package.json, so Node would default .js to CommonJS and throw on the
+// `export`/`import` syntax. Mark the function root as ESM (packages under
+// node_modules keep their own package.json "type", so this only affects our
+// emitted bundle files).
+await writeFile(
+  path.join(fnDir, "package.json"),
+  JSON.stringify({ type: "module" }, null, 2),
+);
 
 await writeFile(
   path.join(fnDir, ".vc-config.json"),
