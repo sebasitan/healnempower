@@ -11,6 +11,11 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 export default defineConfig({
   cloudflare: !process.env.VERCEL,
   tanstackStart: {
-    server: { entry: "server" },
+    server: {
+      entry: "server",
+      // Use the Vercel preset on Vercel so Nitro outputs .vercel/output/
+      // with serverless functions + routing config (fixes 404 on Vercel).
+      ...(process.env.VERCEL ? { preset: "vercel" } : {}),
+    },
   },
 });
